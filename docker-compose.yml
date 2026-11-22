@@ -1,0 +1,48 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-squadhabit}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-squadhabit}
+      POSTGRES_DB: ${POSTGRES_DB:-squadhabit}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 5s
+
+  backend:
+    build:
+      context: ./backend
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql://squadhabit:squadhabit@postgres:5432/squadhabit}
+      PORT: ${PORT:-3000}
+      HOST: ${HOST:-0.0.0.0}
+      BOT_TOKEN: ${BOT_TOKEN:-}
+      BOT_USERNAME: ${BOT_USERNAME:-}
+      WEBAPP_URL: ${WEBAPP_URL:-http://localhost:8080}
+      STORAGE_CHAT_ID: ${STORAGE_CHAT_ID:-}
+      DEV_MODE: ${DEV_MODE:-false}
+    ports:
+      - "3000:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        VITE_API_URL: ${VITE_API_URL:-}
+    ports:
+      - "8080:80"
+    depends_on:
+      - backend
+
+volumes:
+  pgdata:
