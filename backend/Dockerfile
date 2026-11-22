@@ -13,7 +13,7 @@ RUN npx prisma generate && npm run build
 
 FROM node:20-alpine AS runtime
 
-RUN apk add --no-cache openssl
+RUN apk add --no-cache openssl ffmpeg
 WORKDIR /app
 ENV NODE_ENV=production
 
