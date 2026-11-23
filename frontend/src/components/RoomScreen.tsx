@@ -75,12 +75,16 @@ function FeedCard({
     <article className="feed-card">
       <div className="feed-card-heading">
         {item.user.photoUrl ? (
-          <img className="avatar" src={item.user.photoUrl} alt="" />
+          <img className={`avatar${item.user.isVip ? " avatar--vip" : ""}`} src={item.user.photoUrl} alt="" />
         ) : (
-          <span className="avatar">{item.user.firstName.slice(0, 1).toUpperCase()}</span>
+          <span className={`avatar${item.user.isVip ? " avatar--vip" : ""}`}>{item.user.firstName.slice(0, 1).toUpperCase()}</span>
         )}
         <div className="feed-author">
           <strong>{item.user.firstName}{isMine ? " · вы" : ""}</strong>
+          <span className="member-badges">
+            {item.user.isVip && <span className="member-badge member-badge--vip">VIP</span>}
+            {item.user.isSupporter && <span className="member-badge member-badge--supporter">⭐</span>}
+          </span>
           <small>{new Date(item.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</small>
         </div>
         <span className="status-pill">{getStatusText(item.status)}</span>
@@ -244,6 +248,23 @@ export default function RoomScreen({
       await Promise.all([loadRoom(), onDataChanged()]);
     } catch (requestError) {
       onToast(requestError instanceof Error ? requestError.message : "Не удалось применить щит", "error");
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  async function handleStreakFreeze() {
+    if (!room || submitting) {
+      return;
+    }
+    setSubmitting(true);
+    try {
+      const result = await api.applyStreakFreeze(room.challenge.id);
+      onToast(`День заморожен. Осталось заморозок: ${result.streakFreezes}`, "success");
+      haptic({ type: "notification", style: "success" });
+      await Promise.all([loadRoom(), onDataChanged()]);
+    } catch (requestError) {
+      onToast(requestError instanceof Error ? requestError.message : "Не удалось заморозить день", "error");
     } finally {
       setSubmitting(false);
     }
@@ -547,6 +568,16 @@ export default function RoomScreen({
               🛡️ Применить щит на сегодня
             </button>
           )}
+          {user.streakFreezes > 0 && !checkin && (
+            <button
+              className="button button--secondary button--block"
+              type="button"
+              disabled={submitting}
+              onClick={() => void handleStreakFreeze()}
+            >
+              Заморозить день
+            </button>
+          )}
         </form>
       ) : (
         <div className={`status-banner ${checkin?.status === "SHIELDED" ? "status-banner--shield" : ""}`}>
@@ -665,7 +696,11 @@ export default function RoomScreen({
             <tbody>
               {room.matrix.map((row) => (
                 <tr key={row.userId}>
-                  <td className="matrix-name">{row.firstName}</td>
+                  <td className="matrix-name">
+                    {row.firstName}
+                    {row.isVip && <span className="member-badge member-badge--vip">VIP</span>}
+                    {row.isSupporter && <span className="member-badge member-badge--supporter">⭐</span>}
+                  </td>
                   {room.matrixDates.map((date) => (
                     <td key={date} title={`${date}: ${row.dates[date]}`}>
                       {getStatusSymbol(row.dates[date])}

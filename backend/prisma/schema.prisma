@@ -41,6 +41,10 @@ model User {
   shieldsCount         Int                   @default(1)
   isPro                Boolean               @default(false)
   proUntil             DateTime?
+  isSupporter          Boolean               @default(false)
+  totalDonatedStars    Int                   @default(0)
+  vipUntil             DateTime?
+  streakFreezes        Int                   @default(0)
   createdAt            DateTime              @default(now())
   updatedAt            DateTime              @updatedAt
   challenges           Challenge[]           @relation("ChallengeCreator")
@@ -50,6 +54,7 @@ model User {
   vetoVotes            VetoVote[]
   reactions            Reaction[]
   payments             Payment[]
+  starPayments         StarPayment[]
   notificationLogs     NotificationLog[]
 }
 
@@ -148,6 +153,19 @@ model Payment {
   amountXtr               Int
   createdAt               DateTime @default(now())
   user                    User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model StarPayment {
+  id                      String   @id @default(cuid())
+  userId                  String
+  telegramPaymentChargeId String   @unique
+  payload                 String
+  productType             String
+  starsAmount             Int
+  createdAt               DateTime @default(now())
+  user                    User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, productType, createdAt])
 }
 
 model NotificationLog {

@@ -2,10 +2,15 @@ import { CheckinStatus, MediaType, Prisma } from "@prisma/client";
 import { InlineKeyboard } from "grammy";
 import type { InlineQueryResultArticle, User as TelegramUser } from "grammy/types";
 import { z } from "zod";
-import { config, STORE_PRODUCTS } from "./config";
+import { config, FREEZE_MONTHLY_LIMIT, STORE_PRODUCTS } from "./config";
 import { prisma } from "./db";
 import { bot, getBotUsername, isBotConfigured } from "./telegram";
 import { joinChallengeByCode, submitCheckin } from "./services/checkinService";
+import {
+  activateStarPayment,
+  getFreezePurchasesThisMonth,
+  getStarPaymentPrice,
+} from "./services/starPaymentService";
 import { AppError } from "./utils/appError";
 import { getLocalDateString } from "./utils/timezone";
 
@@ -16,8 +21,15 @@ const paymentPayloadSchema = z.object({
   userId: z.string().min(1),
   productType: productTypeSchema,
 });
+const starPaymentPayloadSchema = z.object({
+  u: z.string().min(1),
+  t: z.enum(["D", "F", "V"]),
+  a: z.number().int().optional(),
+  n: z.string().min(1),
+}).strict();
 
 type ProductType = z.infer<typeof productTypeSchema>;
+type StarProductType = "DONATE" | "STREAK_FREEZE" | "VIP_30D";
 
 interface PendingProof {
   fileId: string;
@@ -62,6 +74,37 @@ function parsePaymentPayload(value: string) {
     const parsedJson: unknown = JSON.parse(value);
     const parsed = paymentPayloadSchema.safeParse(parsedJson);
     return parsed.success ? parsed.data : null;
+  } catch {
+    return null;
+  }
+}
+
+function parseStarPaymentPayload(value: string): {
+  userId: string;
+  productType: StarProductType;
+  amount?: number;
+} | null {
+  try {
+    const parsed = starPaymentPayloadSchema.safeParse(JSON.parse(value) as unknown);
+    if (!parsed.success) {
+      return null;
+    }
+    const productType = parsed.data.t === "D"
+      ? "DONATE"
+      : parsed.data.t === "F"
+        ? "STREAK_FREEZE"
+        : "VIP_30D";
+    if (
+      (productType === "DONATE" && getStarPaymentPrice(productType, parsed.data.a) === null) ||
+      (productType !== "DONATE" && parsed.data.a !== undefined)
+    ) {
+      return null;
+    }
+    return {
+      userId: parsed.data.u,
+      productType,
+      ...(parsed.data.a !== undefined ? { amount: parsed.data.a } : {}),
+    };
   } catch {
     return null;
   }
@@ -364,24 +407,51 @@ export function registerBotHandlers(): void {
   });
 
   activeBot.on("pre_checkout_query", async (ctx) => {
-    const payload = parsePaymentPayload(ctx.preCheckoutQuery.invoice_payload);
+    const rawPayload = ctx.preCheckoutQuery.invoice_payload;
+    const starPayload = parseStarPaymentPayload(rawPayload);
+    const payload = starPayload ? null : parsePaymentPayload(rawPayload);
     let rejectionReason: string | undefined;
     try {
-      if (!payload) {
+      if (!starPayload && !payload) {
         rejectionReason = "Некорректные данные счёта.";
-      } else {
-        const product = getPaymentProduct(payload.productType);
+      } else if (starPayload) {
+        const price = getStarPaymentPrice(starPayload.productType, starPayload.amount);
         const user = await prisma.user.findUnique({
-          where: { id: payload.userId },
+          where: { id: starPayload.userId },
           select: { telegramId: true },
         });
         if (!user || user.telegramId !== BigInt(ctx.from.id)) {
           rejectionReason = "Этот счёт создан для другого пользователя.";
         } else if (
+          price === null ||
           ctx.preCheckoutQuery.currency !== "XTR" ||
-          ctx.preCheckoutQuery.total_amount !== product.amountXtr
+          ctx.preCheckoutQuery.total_amount !== price
         ) {
           rejectionReason = "Сумма или валюта счёта не совпадает с товаром.";
+        } else if (
+          starPayload.productType === "STREAK_FREEZE" &&
+          await getFreezePurchasesThisMonth(prisma, starPayload.userId) >= FREEZE_MONTHLY_LIMIT
+        ) {
+          rejectionReason = "Лимит покупки заморозок на этот месяц исчерпан.";
+        }
+      } else {
+        const legacyPayload = payload;
+        if (!legacyPayload) {
+          rejectionReason = "Некорректные данные счёта.";
+        } else {
+          const product = getPaymentProduct(legacyPayload.productType);
+          const user = await prisma.user.findUnique({
+            where: { id: legacyPayload.userId },
+            select: { telegramId: true },
+          });
+          if (!user || user.telegramId !== BigInt(ctx.from.id)) {
+            rejectionReason = "Этот счёт создан для другого пользователя.";
+          } else if (
+            ctx.preCheckoutQuery.currency !== "XTR" ||
+            ctx.preCheckoutQuery.total_amount !== product.amountXtr
+          ) {
+            rejectionReason = "Сумма или валюта счёта не совпадает с товаром.";
+          }
         }
       }
     } catch (error) {
@@ -398,6 +468,65 @@ export function registerBotHandlers(): void {
 
   activeBot.on("message:successful_payment", async (ctx) => {
     const payment = ctx.message.successful_payment;
+    const starPayload = parseStarPaymentPayload(payment.invoice_payload);
+    if (starPayload) {
+      const price = getStarPaymentPrice(starPayload.productType, starPayload.amount);
+      if (payment.currency !== "XTR" || price === null || payment.total_amount !== price) {
+        console.error("[telegram] Successful Stars payment amount or currency does not match product");
+        await ctx.reply("Данные платежа не совпали\nОбратитесь в поддержку.", {
+          reply_markup: getTrackerKeyboard(),
+        });
+        return;
+      }
+
+      try {
+        const activation = await activateStarPayment({
+          database: prisma,
+          userId: starPayload.userId,
+          telegramId: BigInt(ctx.from.id),
+          telegramPaymentChargeId: payment.telegram_payment_charge_id,
+          payload: payment.invoice_payload,
+          productType: starPayload.productType,
+          starsAmount: payment.total_amount,
+        });
+        if (activation.quotaExceeded) {
+          try {
+            await activeBot.api.refundStarPayment(
+              ctx.from.id,
+              payment.telegram_payment_charge_id,
+            );
+            await ctx.reply("Лимит заморозок исчерпан, Stars возвращены.", {
+              reply_markup: getTrackerKeyboard(),
+            });
+          } catch (refundError) {
+            console.error("[telegram] Failed to refund a payment over the freeze limit", refundError);
+            await ctx.reply("Лимит заморозок исчерпан. Свяжитесь с поддержкой для возврата Stars.", {
+              reply_markup: getTrackerKeyboard(),
+            });
+          }
+          return;
+        }
+        if (activation.duplicate) {
+          await ctx.reply("Покупка уже активирована.", {
+            reply_markup: getTrackerKeyboard(),
+          });
+          return;
+        }
+        const message = starPayload.productType === "DONATE"
+          ? "Спасибо за поддержку SquadHabit! Бейдж спонсора активирован."
+          : starPayload.productType === "STREAK_FREEZE"
+            ? "Заморозка стрика добавлена."
+            : "VIP активирован на 30 дней. Вам также начислена заморозка стрика.";
+        await ctx.reply(message, { reply_markup: getTrackerKeyboard() });
+      } catch (error) {
+        console.error("[telegram] Failed to activate a Stars payment", error);
+        await ctx.reply("Не удалось активировать покупку\nОбратитесь в поддержку.", {
+          reply_markup: getTrackerKeyboard(),
+        });
+      }
+      return;
+    }
+
     const payload = parsePaymentPayload(payment.invoice_payload);
     if (!payload) {
       console.error("[telegram] Successful payment has an invalid invoice payload");

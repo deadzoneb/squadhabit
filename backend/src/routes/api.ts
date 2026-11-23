@@ -13,15 +13,22 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
-import { config, STORE_PRODUCTS } from "../config";
+import { config, FREEZE_MONTHLY_LIMIT, STAR_PRICES } from "../config";
 import { db } from "../db";
 import { bot, getBotUsername } from "../telegram";
 import {
   applyShieldToChallenge,
+  applyStreakFreeze,
   joinChallengeByCode,
   submitCheckin,
   toggleVetoVote,
 } from "../services/checkinService";
+import {
+  activateStarPayment,
+  getFreezePurchasesThisMonth,
+  getStarPaymentPrice,
+  serializeMonetization,
+} from "../services/starPaymentService";
 import { AppError } from "../utils/appError";
 import {
   DEV_TEST_USER,
@@ -66,7 +73,8 @@ const reactionSchema = z.object({
   emoji: z.enum(["🔥", "💪", "👏", "👀"]),
 });
 const productSchema = z.object({
-  productId: z.enum(["SHIELD_1", "SHIELD_5", "PRO_30"]),
+  productType: z.enum(["DONATE", "STREAK_FREEZE", "VIP_30D"]),
+  amount: z.number().int().optional(),
 });
 
 type CheckinLabel = "DONE" | "PENDING" | "VETOED" | "SHIELDED";
@@ -84,8 +92,12 @@ function getCheckinLabel(status: CheckinStatus | null): CheckinLabel {
   return "PENDING";
 }
 
-function serializeUser(user: User) {
+function serializeUser<T extends User>(user: T) {
   return { ...user, telegramId: user.telegramId.toString() };
+}
+
+async function serializeUserWithMonetization(user: User) {
+  return serializeUser(await serializeMonetization(db, user));
 }
 
 function runFfmpeg(args: string[]): Promise<void> {
@@ -130,46 +142,6 @@ async function convertVideoNoteToMp4(inputBuffer: Buffer): Promise<Buffer> {
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
-}
-
-async function createDevPurchase(
-  userId: string,
-  productId: keyof typeof STORE_PRODUCTS,
-): Promise<{ simulated: true; shieldsCount: number; isPro: boolean; proUntil: Date | null }> {
-  const product = STORE_PRODUCTS[productId];
-  return db.$transaction(async (transaction) => {
-    const user = await transaction.user.findUniqueOrThrow({ where: { id: userId } });
-    const now = new Date();
-    const proUntil =
-      productId === "PRO_30"
-        ? new Date(
-            Math.max(now.getTime(), user.proUntil?.getTime() ?? 0) +
-              STORE_PRODUCTS.PRO_30.proDays * 24 * 60 * 60 * 1000,
-          )
-        : user.proUntil;
-
-    await transaction.payment.create({
-      data: {
-        userId,
-        telegramPaymentChargeId: `DEV_${randomUUID()}`,
-        productType: productId,
-        amountXtr: product.amountXtr,
-      },
-    });
-    const updatedUser = await transaction.user.update({
-      where: { id: userId },
-      data: {
-        shieldsCount: { increment: product.shields },
-        ...(productId === "PRO_30" ? { isPro: true, proUntil } : {}),
-      },
-    });
-    return {
-      simulated: true,
-      shieldsCount: updatedUser.shieldsCount,
-      isPro: updatedUser.isPro,
-      proUntil: updatedUser.proUntil,
-    };
-  });
 }
 
 export function registerApiRoutes(app: FastifyInstance): void {
@@ -274,9 +246,10 @@ export function registerApiRoutes(app: FastifyInstance): void {
       }
 
       return {
-        user: serializeUser(user),
+        user: await serializeUserWithMonetization(user),
         botUsername,
-        products: STORE_PRODUCTS,
+        products: STAR_PRICES,
+        prices: STAR_PRICES,
         joinedChallengeId,
         joinError,
       };
@@ -332,6 +305,8 @@ export function registerApiRoutes(app: FastifyInstance): void {
             firstName: user.firstName,
             username: user.username,
             photoUrl: user.photoUrl,
+            isSupporter: user.isSupporter,
+            isVip: Boolean(user.vipUntil && user.vipUntil > now),
             personalStreak: membership.personalStreak,
             bestStreak: membership.bestStreak,
             status: getCheckinLabel(status),
@@ -437,6 +412,8 @@ export function registerApiRoutes(app: FastifyInstance): void {
       const matrix = challenge.members.map(({ user, userId, personalStreak, bestStreak }) => ({
         userId,
         firstName: user.firstName,
+        isVip: Boolean(user.vipUntil && user.vipUntil > now),
+        isSupporter: user.isSupporter,
         personalStreak,
         bestStreak,
         dates: Object.fromEntries(
@@ -449,7 +426,16 @@ export function registerApiRoutes(app: FastifyInstance): void {
       const feedCheckins = await db.checkin.findMany({
         where: { challengeId: challenge.id, date: today },
         include: {
-          user: { select: { id: true, firstName: true, username: true, photoUrl: true } },
+          user: {
+            select: {
+              id: true,
+              firstName: true,
+              username: true,
+              photoUrl: true,
+              isSupporter: true,
+              vipUntil: true,
+            },
+          },
           reactions: { select: { userId: true, emoji: true } },
           _count: { select: { vetoVotes: true } },
         },
@@ -465,6 +451,10 @@ export function registerApiRoutes(app: FastifyInstance): void {
         }
         return {
           ...checkin,
+          user: {
+            ...checkin.user,
+            isVip: Boolean(checkin.user.vipUntil && checkin.user.vipUntil > now),
+          },
           mediaUrl: checkin.telegramFileId
             ? `/api/media/${encodeURIComponent(checkin.telegramFileId)}`
             : null,
@@ -496,6 +486,9 @@ export function registerApiRoutes(app: FastifyInstance): void {
               firstName: user.firstName,
               username: user.username,
               photoUrl: user.photoUrl,
+              isSupporter: user.isSupporter,
+              vipUntil: user.vipUntil,
+              isVip: Boolean(user.vipUntil && user.vipUntil > now),
             },
           })),
         },
@@ -767,6 +760,19 @@ export function registerApiRoutes(app: FastifyInstance): void {
       return reply.send(result);
     });
 
+    api.post<{ Params: { id: string } }>("/api/challenges/:id/freeze", async (request, reply) => {
+      const parsedParams = idParamsSchema.safeParse(request.params);
+      if (!parsedParams.success) {
+        return reply.code(400).send({ error: "Invalid challenge id" });
+      }
+      const result = await applyStreakFreeze({
+        challengeId: parsedParams.data.id,
+        userId: request.currentUser.id,
+        timezone: request.currentUser.timezone,
+      });
+      return reply.send(result);
+    });
+
     api.post<{ Params: { id: string } }>("/api/checkins/:id/veto", async (request, reply) => {
       const parsedParams = idParamsSchema.safeParse(request.params);
       if (!parsedParams.success) {
@@ -811,7 +817,8 @@ export function registerApiRoutes(app: FastifyInstance): void {
     });
 
     api.get("/api/me", async (request) => ({
-      user: serializeUser(request.currentUser),
+      user: await serializeUserWithMonetization(request.currentUser),
+      prices: STAR_PRICES,
       challenges: await db.challengeMember.findMany({
         where: { userId: request.currentUser.id },
         include: { challenge: true },
@@ -828,7 +835,7 @@ export function registerApiRoutes(app: FastifyInstance): void {
         where: { id: request.currentUser.id },
         data: parsed.data,
       });
-      return { user: serializeUser(user) };
+      return { user: await serializeUserWithMonetization(user) };
     });
 
     api.post("/api/payments/invoice", async (request, reply) => {
@@ -836,25 +843,61 @@ export function registerApiRoutes(app: FastifyInstance): void {
       if (!parsed.success) {
         return reply.code(400).send({ error: "Invalid product", details: parsed.error.issues });
       }
-      const productId = parsed.data.productId;
-      const product = STORE_PRODUCTS[productId];
+      const { productType, amount } = parsed.data;
+      if (productType !== "DONATE" && amount !== undefined) {
+        throw new AppError(400, "Для этого товара сумма не указывается");
+      }
+      const price = getStarPaymentPrice(productType, amount);
+      if (price === null) {
+        throw new AppError(400, "Недопустимая сумма поддержки");
+      }
+      if (
+        productType === "STREAK_FREEZE" &&
+        await getFreezePurchasesThisMonth(db, request.currentUser.id) >= FREEZE_MONTHLY_LIMIT
+      ) {
+        throw new AppError(400, "Лимит покупки заморозок на этот месяц исчерпан");
+      }
+
+      const payload = JSON.stringify({
+        u: request.currentUser.id,
+        t: productType === "DONATE" ? "D" : productType === "STREAK_FREEZE" ? "F" : "V",
+        ...(productType === "DONATE" ? { a: amount } : {}),
+        n: randomBytes(6).toString("hex"),
+      });
       if (!config.botToken) {
         if (!config.devMode) {
           throw new AppError(503, "Telegram payments are not configured");
         }
-        return createDevPurchase(request.currentUser.id, productId);
+        const activation = await activateStarPayment({
+          database: db,
+          userId: request.currentUser.id,
+          telegramId: request.currentUser.telegramId,
+          telegramPaymentChargeId: `DEV_${randomUUID()}`,
+          payload,
+          productType,
+          starsAmount: price,
+        });
+        return { simulated: true, ...activation };
       }
       if (!bot) {
         throw new AppError(503, "Telegram bot is not configured");
       }
 
       const invoiceUrl = await bot.api.createInvoiceLink(
-        productId === "PRO_30" ? "SquadHabit PRO на 30 дней" : "Щиты SquadHabit",
-        productId === "PRO_30" ? "30 дней PRO и 3 щита" : `Щиты: ${product.shields}`,
-        JSON.stringify({ userId: request.currentUser.id, productType: productId }),
+        productType === "DONATE"
+          ? "Поддержка SquadHabit"
+          : productType === "STREAK_FREEZE"
+            ? "Заморозка стрика"
+            : "VIP на 30 дней",
+        productType === "DONATE"
+          ? `Поддержать проект на ${price} Stars`
+          : productType === "STREAK_FREEZE"
+            ? "Одна заморозка дня стрика"
+            : "VIP на 30 дней и бонусная заморозка",
+        payload,
         "",
         "XTR",
-        [{ label: productId, amount: product.amountXtr }],
+        [{ label: productType, amount: price }],
       );
       return { invoiceUrl };
     });

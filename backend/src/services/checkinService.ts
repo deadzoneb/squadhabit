@@ -24,6 +24,52 @@ interface ApplyShieldInput {
   timezone: string;
 }
 
+export async function applyStreakFreeze({
+  challengeId,
+  userId,
+  timezone,
+}: ApplyShieldInput) {
+  const date = getLocalDateString(new Date(), timezone);
+
+  return db.$transaction(async (transaction) => {
+    const membership = await transaction.challengeMember.findUnique({
+      where: { challengeId_userId: { challengeId, userId } },
+    });
+    if (!membership) {
+      throw new AppError(403, "You are not a member of this challenge");
+    }
+
+    const key = { challengeId_userId_date: { challengeId, userId, date } };
+    const existing = await transaction.checkin.findUnique({ where: key });
+    if (existing) {
+      throw new AppError(409, "Сегодняшний день уже отмечен");
+    }
+
+    const spentFreeze = await transaction.user.updateMany({
+      where: { id: userId, streakFreezes: { gt: 0 } },
+      data: { streakFreezes: { decrement: 1 } },
+    });
+    if (spentFreeze.count === 0) {
+      throw new AppError(409, "Нет доступных заморозок стрика");
+    }
+
+    const checkin = await transaction.checkin.create({
+      data: {
+        challengeId,
+        userId,
+        date,
+        status: CheckinStatus.SHIELDED,
+        mediaType: MediaType.NONE,
+      },
+    });
+    const user = await transaction.user.findUniqueOrThrow({
+      where: { id: userId },
+      select: { streakFreezes: true },
+    });
+    return { checkin, streakFreezes: user.streakFreezes };
+  }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+}
+
 export async function submitCheckin({
   challengeId,
   userId,

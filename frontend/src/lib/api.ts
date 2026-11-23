@@ -8,13 +8,14 @@ import type {
   InvoiceResponse,
   LobbyResponse,
   MeResponse,
-  ProductId,
+  ProductType,
   ReactionEmoji,
   ReactionResponse,
   RoomResponse,
   SettingsInput,
   SettingsResponse,
   ShieldResponse,
+  StreakFreezeResponse,
   VetoResponse,
 } from "../types";
 
@@ -191,6 +192,10 @@ async function applyShield(challengeId: string): Promise<ShieldResponse> {
   return request(`/api/challenges/${encodeId(challengeId)}/shield`, { method: "POST" });
 }
 
+async function applyStreakFreeze(challengeId: string): Promise<StreakFreezeResponse> {
+  return request(`/api/challenges/${encodeId(challengeId)}/freeze`, { method: "POST" });
+}
+
 async function toggleVeto(checkinId: string): Promise<VetoResponse> {
   return request(`/api/checkins/${encodeId(checkinId)}/veto`, { method: "POST" });
 }
@@ -213,10 +218,10 @@ async function updateSettings(input: SettingsInput): Promise<SettingsResponse> {
   return request("/api/me/settings", { method: "PATCH", body: input });
 }
 
-async function createInvoice(productId: ProductId): Promise<InvoiceResponse> {
+async function createInvoice(productType: ProductType, amount?: number): Promise<InvoiceResponse> {
   return request("/api/payments/invoice", {
     method: "POST",
-    body: { productId },
+    body: { productType, ...(amount !== undefined ? { amount } : {}) },
   });
 }
 
@@ -235,6 +240,7 @@ export const api = {
   voteToDeleteChallenge,
   cancelDeleteRequest,
   applyShield,
+  applyStreakFreeze,
   toggleVeto,
   toggleReaction,
   getMe,

@@ -5,7 +5,7 @@ export type CheckinStatus = "APPROVED" | "VETOED" | "SHIELDED";
 export type MediaType = "NONE" | "PHOTO" | "VIDEO" | "VIDEO_NOTE";
 export type MemberStatus = "DONE" | "PENDING" | "VETOED" | "SHIELDED";
 export type ReactionEmoji = "🔥" | "💪" | "👏" | "👀";
-export type ProductId = "SHIELD_1" | "SHIELD_5" | "PRO_30";
+export type ProductType = "DONATE" | "STREAK_FREEZE" | "VIP_30D";
 
 export interface User {
   id: string;
@@ -18,6 +18,13 @@ export interface User {
   shieldsCount: number;
   isPro: boolean;
   proUntil: string | null;
+  isSupporter: boolean;
+  totalDonatedStars: number;
+  isVip: boolean;
+  vipUntil: string | null;
+  streakFreezes: number;
+  freezePurchasesThisMonth: number;
+  freezeMonthlyLimit: number;
   createdAt: string;
   updatedAt: string;
 }
@@ -51,6 +58,8 @@ export interface LobbyMember {
   firstName: string;
   username: string | null;
   photoUrl: string | null;
+  isSupporter: boolean;
+  isVip: boolean;
   personalStreak: number;
   bestStreak: number;
   status: MemberStatus;
@@ -64,14 +73,15 @@ export interface BootstrapResponse {
   user: User;
   botUsername: string | null;
   products: ProductCatalog;
+  prices: ProductCatalog;
   joinedChallengeId: string | null;
   joinError: string | null;
 }
 
 export interface ProductCatalog {
-  SHIELD_1: { amountXtr: number; shields: number };
-  SHIELD_5: { amountXtr: number; shields: number };
-  PRO_30: { amountXtr: number; proDays: number; shields: number };
+  DONATE: readonly [number, number, number];
+  STREAK_FREEZE: number;
+  VIP_30D: number;
 }
 
 export interface LobbyResponse {
@@ -82,7 +92,7 @@ export interface LobbyResponse {
 }
 
 export interface RoomMember extends ChallengeMember {
-  user: Pick<User, "id" | "firstName" | "username" | "photoUrl">;
+  user: Pick<User, "id" | "firstName" | "username" | "photoUrl" | "isSupporter" | "isVip" | "vipUntil">;
 }
 
 export interface RoomReaction {
@@ -104,13 +114,15 @@ export interface RoomFeedItem {
   updatedAt: string;
   mediaUrl: string | null;
   vetoCount: number;
-  user: Pick<User, "id" | "firstName" | "username" | "photoUrl">;
+  user: Pick<User, "id" | "firstName" | "username" | "photoUrl" | "isSupporter" | "isVip" | "vipUntil">;
   reactions: RoomReaction[];
 }
 
 export interface MatrixRow {
   userId: string;
   firstName: string;
+  isVip: boolean;
+  isSupporter: boolean;
   personalStreak: number;
   bestStreak: number;
   dates: Record<string, MemberStatus>;
@@ -167,6 +179,10 @@ export interface ShieldResponse extends CheckinResponse {
   shieldsCount: number;
 }
 
+export interface StreakFreezeResponse extends CheckinResponse {
+  streakFreezes: number;
+}
+
 export interface VetoResponse {
   status: CheckinStatus;
   vetoCount: number;
@@ -183,6 +199,7 @@ export interface ReactionResponse {
 
 export interface MeResponse {
   user: User;
+  prices: ProductCatalog;
   challenges: Array<{
     id: string;
     challengeId: string;
@@ -205,12 +222,7 @@ export interface SettingsResponse {
 
 export type InvoiceResponse =
   | { invoiceUrl: string }
-  | {
-      simulated: true;
-      shieldsCount: number;
-      isPro: boolean;
-      proUntil: string | null;
-    };
+  | { simulated: true; duplicate: boolean; quotaExceeded: boolean };
 
 export interface ApiErrorResponse {
   error: string;

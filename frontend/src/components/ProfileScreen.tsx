@@ -4,7 +4,7 @@ import { getTelegramWebApp, haptic } from "../lib/telegram";
 import type {
   LobbyResponse,
   ProductCatalog,
-  ProductId,
+  ProductType,
   User,
 } from "../types";
 
@@ -16,12 +16,6 @@ interface ProfileScreenProps {
   onDataChanged: () => Promise<void>;
   onToast: (message: string, type?: "success" | "error" | "info") => void;
 }
-
-const productDetails: Record<ProductId, { title: string; description: string }> = {
-  SHIELD_1: { title: "Один щит", description: "Сохраните серию на один день" },
-  SHIELD_5: { title: "Набор из 5 щитов", description: "Пять дней под защитой" },
-  PRO_30: { title: "SquadHabit PRO", description: "30 дней PRO и 3 щита" },
-};
 
 function isProActive(user: User): boolean {
   return user.isPro && (!user.proUntil || new Date(user.proUntil).getTime() > Date.now());
@@ -38,7 +32,7 @@ export default function ProfileScreen({
   const [reminderHour, setReminderHour] = useState(user.reminderHour);
   const [selectedChallengeId, setSelectedChallengeId] = useState("");
   const [savingSettings, setSavingSettings] = useState(false);
-  const [purchasing, setPurchasing] = useState<ProductId | null>(null);
+  const [purchasing, setPurchasing] = useState<ProductType | null>(null);
 
   const eligibleChallenges = useMemo(
     () =>
@@ -90,15 +84,15 @@ export default function ProfileScreen({
     }
   }
 
-  async function buyProduct(productId: ProductId) {
+  async function buyProduct(productType: ProductType, amount?: number) {
     if (purchasing) {
       return;
     }
-    setPurchasing(productId);
+    setPurchasing(productType);
     try {
-      const invoice = await api.createInvoice(productId);
+      const invoice = await api.createInvoice(productType, amount);
       if (!("invoiceUrl" in invoice)) {
-        onToast("Покупка в тестовом режиме успешно активирована", "success");
+        onToast("Покупка успешно активирована", "success");
         await onDataChanged();
         return;
       }
@@ -112,7 +106,14 @@ export default function ProfileScreen({
       webApp.openInvoice(invoice.invoiceUrl, (status) => {
         if (status === "paid") {
           onToast("Покупка оплачена и активируется", "success");
-          void onDataChanged();
+          void onDataChanged().catch((refreshError: unknown) => {
+            onToast(refreshError instanceof Error ? refreshError.message : "Не удалось обновить профиль", "error");
+          });
+          window.setTimeout(() => {
+            void onDataChanged().catch((refreshError: unknown) => {
+              onToast(refreshError instanceof Error ? refreshError.message : "Не удалось обновить профиль", "error");
+            });
+          }, 1500);
         } else if (status === "failed") {
           onToast("Платёж не прошёл. Попробуйте ещё раз.", "error");
         } else if (status === "cancelled") {
@@ -140,16 +141,23 @@ export default function ProfileScreen({
 
       <section className="card profile-card">
         {user.photoUrl ? (
-          <img className="avatar profile-avatar" src={user.photoUrl} alt={user.firstName} />
+          <img className={`avatar profile-avatar${user.isVip ? " avatar--vip" : ""}`} src={user.photoUrl} alt={user.firstName} />
         ) : (
-          <span className="avatar profile-avatar">{initials}</span>
+          <span className={`avatar profile-avatar${user.isVip ? " avatar--vip" : ""}`}>{initials}</span>
         )}
         <div className="profile-details">
           <h2>{user.firstName}</h2>
           {user.username && <span className="muted">@{user.username}</span>}
           {proActive && <span className="pro-badge">✦ PRO{user.proUntil ? ` до ${new Date(user.proUntil).toLocaleDateString()}` : ""}</span>}
+          {user.isVip && user.vipUntil && <span className="member-badge member-badge--vip">VIP · до {new Date(user.vipUntil).toLocaleDateString("ru-RU")}</span>}
+          {user.isSupporter && <span className="member-badge member-badge--supporter">⭐ Поддержал проект</span>}
           <p className="muted">Часовой пояс: {user.timezone}</p>
         </div>
+      </section>
+
+      <section className="card profile-stats">
+        <strong>Заморозки стрика: {user.streakFreezes}</strong>
+        <span className="muted">Поддержка проекта: {user.totalDonatedStars} ⭐</span>
       </section>
 
       <section className="card settings-card">
@@ -212,29 +220,60 @@ export default function ProfileScreen({
 
       <section className="card shop-card">
         <div>
-          <h2>⭐ Магазин Stars</h2>
-          <p className="muted">Покупки оплачиваются Telegram Stars (XTR).</p>
+          <h2>Поддержать проект и бонусы</h2>
+          <p className="muted">Покупки добровольные и оплачиваются Telegram Stars.</p>
         </div>
-        {(Object.keys(productDetails) as ProductId[]).map((productId) => {
-          const product = products[productId];
-          const details = productDetails[productId];
-          return (
-            <div className="shop-product" key={productId}>
-              <div>
-                <strong>{details.title}</strong>
-                <small>{details.description}</small>
-              </div>
+        <div className="support-section">
+          <div>
+            <strong>Поддержать</strong>
+            <small>На сервер и развитие SquadHabit · даёт вечный бейдж спонсора</small>
+          </div>
+          <div className="support-buttons">
+            {products.DONATE.map((amount) => (
               <button
                 className="button button--quiet"
+                key={amount}
                 type="button"
-                disabled={purchasing !== null || (productId === "PRO_30" && proActive)}
-                onClick={() => void buyProduct(productId)}
+                disabled={purchasing !== null}
+                onClick={() => void buyProduct("DONATE", amount)}
               >
-                {purchasing === productId ? "…" : `${product.amountXtr} ⭐`}
+                {purchasing === "DONATE" ? "…" : `${amount} ⭐`}
               </button>
-            </div>
-          );
-        })}
+            ))}
+          </div>
+        </div>
+        <div className="support-section">
+          <div>
+            <strong>Заморозка стрика · {products.STREAK_FREEZE} ⭐</strong>
+            <small>Сохранит серию, если пропустите день. Куплено {user.freezePurchasesThisMonth} из {user.freezeMonthlyLimit} в этом месяце.</small>
+          </div>
+          <button
+            className="button button--quiet"
+            type="button"
+            disabled={purchasing !== null || user.freezePurchasesThisMonth >= user.freezeMonthlyLimit}
+            onClick={() => void buyProduct("STREAK_FREEZE")}
+          >
+            {user.freezePurchasesThisMonth >= user.freezeMonthlyLimit
+              ? "Лимит на этот месяц исчерпан"
+              : purchasing === "STREAK_FREEZE"
+                ? "…"
+                : "Купить"}
+          </button>
+        </div>
+        <div className="support-section">
+          <div>
+            <strong>VIP на 30 дней · {products.VIP_30D} ⭐</strong>
+            <small>Бейдж VIP в комнатах, акцентная рамка аватара и +1 заморозка стрика в подарок.</small>
+          </div>
+          <button
+            className="button button--quiet"
+            type="button"
+            disabled={purchasing !== null}
+            onClick={() => void buyProduct("VIP_30D")}
+          >
+            {purchasing === "VIP_30D" ? "…" : user.isVip ? "Продлить" : "Подключить"}
+          </button>
+        </div>
       </section>
     </section>
   );

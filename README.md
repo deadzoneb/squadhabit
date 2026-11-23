@@ -11,3 +11,13 @@
 Создайте бота через [@BotFather](https://t.me/BotFather). Чтобы включить inline-вызовы, выполните `/setinline` и задайте текст-подсказку. Создайте Mini App командой `/newapp` либо настройте кнопку меню через `/setmenubutton`; укажите HTTPS URL туннеля из шага 2. Для обычной разработки в браузере приложение доступно по `http://localhost:8080`.
 
 Перед публикацией задайте `DEV_MODE=false`, HTTPS `WEBAPP_URL`, `BOT_TOKEN` и `BOT_USERNAME` в `.env`.
+
+## Обновление базы данных
+
+Контейнер backend применяет актуальную Prisma-схему командой `prisma db push` при каждом старте. После выкладки изменений пересоберите и перезапустите backend:
+
+```powershell
+docker compose up -d --build backend
+```
+
+Для ручного применения схемы используйте `npx prisma db push` из каталога `backend` с настроенным `DATABASE_URL`. Отдельные migration-файлы не используются текущим Docker-деплоем.
