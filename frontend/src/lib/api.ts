@@ -4,6 +4,7 @@ import type {
   CheckinResponse,
   CreateChallengeInput,
   CreateChallengeResponse,
+  DeleteVoteResponse,
   InvoiceResponse,
   LobbyResponse,
   MeResponse,
@@ -20,7 +21,7 @@ import type {
 const apiBaseUrl = (import.meta.env.VITE_API_URL ?? "").replace(/\/$/, "");
 
 interface ApiRequestOptions {
-  method?: "GET" | "POST" | "PATCH";
+  method?: "GET" | "POST" | "PATCH" | "DELETE";
   body?: object | FormData;
 }
 
@@ -157,6 +158,35 @@ async function submitPhotoCheckin(
   });
 }
 
+async function submitVideoNoteCheckin(
+  challengeId: string,
+  videoNote: Blob,
+  caption?: string,
+): Promise<CheckinResponse> {
+  const form = new FormData();
+  form.append("file", videoNote, "video-note.mp4");
+  form.append("proofKind", "video_note");
+  if (caption) {
+    form.append("caption", caption);
+  }
+  return request(`/api/challenges/${encodeId(challengeId)}/checkin`, {
+    method: "POST",
+    body: form,
+  });
+}
+
+async function voteToDeleteChallenge(challengeId: string): Promise<DeleteVoteResponse> {
+  return request(`/api/challenges/${encodeId(challengeId)}/delete-vote`, {
+    method: "POST",
+  });
+}
+
+async function cancelDeleteRequest(challengeId: string): Promise<{ cancelled: true }> {
+  return request(`/api/challenges/${encodeId(challengeId)}/delete-vote`, {
+    method: "DELETE",
+  });
+}
+
 async function applyShield(challengeId: string): Promise<ShieldResponse> {
   return request(`/api/challenges/${encodeId(challengeId)}/shield`, { method: "POST" });
 }
@@ -201,6 +231,9 @@ export const api = {
   getRoom,
   submitButtonCheckin,
   submitPhotoCheckin,
+  submitVideoNoteCheckin,
+  voteToDeleteChallenge,
+  cancelDeleteRequest,
   applyShield,
   toggleVeto,
   toggleReaction,

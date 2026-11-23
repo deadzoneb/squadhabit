@@ -13,6 +13,8 @@ const mediaTypesByExtension: Record<string, string> = {
   png: "image/png",
   webp: "image/webp",
   mp4: "video/mp4",
+  mov: "video/quicktime",
+  webm: "video/webm",
   ogg: "audio/ogg",
 };
 
@@ -22,6 +24,9 @@ function getContentType(filePath: string, mediaType: string): string {
     return mediaTypesByExtension[extension];
   }
   if (mediaType === "VIDEO_NOTE") {
+    return "video/mp4";
+  }
+  if (mediaType === "VIDEO") {
     return "video/mp4";
   }
   if (mediaType === "PHOTO") {
@@ -84,9 +89,13 @@ export function registerMediaRoutes(app: FastifyInstance): void {
       throw new AppError(502, `Telegram media download failed with status ${response.status}`);
     }
 
-    return reply
+    const contentLength = response.headers.get("content-length");
+    const mediaReply = reply
       .header("Cache-Control", "private, max-age=3600")
-      .type(getContentType(telegramFile.file_path, checkin.mediaType))
-      .send(Readable.from(streamChunks(response.body)));
+      .type(getContentType(telegramFile.file_path, checkin.mediaType));
+    if (contentLength) {
+      mediaReply.header("Content-Length", contentLength);
+    }
+    return mediaReply.send(Readable.from(streamChunks(response.body)));
   });
 }

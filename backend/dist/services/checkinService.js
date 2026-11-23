@@ -144,7 +144,7 @@ async function toggleVetoVote(checkinId, voterId) {
         };
     }, { isolationLevel: client_1.Prisma.TransactionIsolationLevel.Serializable });
     if (result.shouldNotify) {
-        await (0, telegram_1.sendTelegramMessage)(result.telegramId, "Ваш пруф оспорен участниками. Пересдайте его до 23:59 по вашему местному времени.");
+        await (0, telegram_1.sendTelegramMessage)(result.telegramId, "Пруф оспорен\nПересдайте до 23:59 по местному времени.");
     }
     return {
         status: result.status,

@@ -1,5 +1,14 @@
-import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type ChangeEvent,
+  type FormEvent,
+} from "react";
 import { api, resolveApiUrl } from "../lib/api";
+import VideoNoteRecorder from "./VideoNoteRecorder";
+import { compressImage } from "../lib/imageCompress";
 import { haptic, shareChallengeInline } from "../lib/telegram";
 import type {
   CheckinStatus,
@@ -22,6 +31,7 @@ interface RoomScreenProps {
 type RoomTab = "feed" | "matrix";
 
 const reactionEmojis: ReactionEmoji[] = ["🔥", "💪", "👏", "👀"];
+const MAX_VIDEO_SIZE = 15 * 1024 * 1024;
 
 function getStatusSymbol(status: MemberStatus | undefined): string {
   switch (status) {
@@ -78,7 +88,7 @@ function FeedCard({
 
       {item.mediaUrl && item.mediaType === "PHOTO" && (
         <img
-          className="feed-media"
+          className="proof-photo"
           src={resolveApiUrl(item.mediaUrl)}
           alt={`Фото-пруф: ${item.user.firstName}`}
           loading="lazy"
@@ -86,7 +96,16 @@ function FeedCard({
       )}
       {item.mediaUrl && item.mediaType === "VIDEO_NOTE" && (
         <video
-          className="feed-media video-note-player"
+          className="proof-video-note"
+          src={resolveApiUrl(item.mediaUrl)}
+          controls
+          playsInline
+          preload="metadata"
+        />
+      )}
+      {item.mediaUrl && item.mediaType === "VIDEO" && (
+        <video
+          className="proof-photo"
           src={resolveApiUrl(item.mediaUrl)}
           controls
           playsInline
@@ -141,8 +160,12 @@ export default function RoomScreen({
   const [error, setError] = useState<string | null>(null);
   const [tab, setTab] = useState<RoomTab>("feed");
   const [caption, setCaption] = useState("");
-  const [photo, setPhoto] = useState<File | null>(null);
+  const [mediaFile, setMediaFile] = useState<File | null>(null);
+  const [videoNoteOpen, setVideoNoteOpen] = useState(false);
+  const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
+  const [deleteSubmitting, setDeleteSubmitting] = useState(false);
   const photoInput = useRef<HTMLInputElement>(null);
+  const videoInput = useRef<HTMLInputElement>(null);
 
   const loadRoom = useCallback(async () => {
     setLoading(true);
@@ -168,21 +191,35 @@ export default function RoomScreen({
     if (!room || submitting) {
       return;
     }
-    if (room.challenge.proofType === "PHOTO" && !photo) {
-      onToast("Сначала выберите фото", "error");
+    if (room.challenge.proofType === "PHOTO" && !mediaFile) {
+      onToast("Сначала выберите фото или видео", "error");
       return;
     }
     setSubmitting(true);
     try {
-      if (room.challenge.proofType === "PHOTO" && photo) {
-        await api.submitPhotoCheckin(room.challenge.id, photo, caption);
+      if (room.challenge.proofType === "PHOTO" && mediaFile) {
+        if (mediaFile.type.startsWith("video/") && mediaFile.size > MAX_VIDEO_SIZE) {
+          onToast("Видео слишком большое, максимум 15 МБ", "error");
+          return;
+        }
+        if (!mediaFile.type.startsWith("image/") && !mediaFile.type.startsWith("video/")) {
+          onToast("Поддерживаются только фото и видео", "error");
+          return;
+        }
+        const fileToUpload = mediaFile.type.startsWith("image/")
+          ? await compressImage(mediaFile)
+          : mediaFile;
+        await api.submitPhotoCheckin(room.challenge.id, fileToUpload, caption);
       } else {
         await api.submitButtonCheckin(room.challenge.id, caption);
       }
       setCaption("");
-      setPhoto(null);
+      setMediaFile(null);
       if (photoInput.current) {
         photoInput.current.value = "";
+      }
+      if (videoInput.current) {
+        videoInput.current.value = "";
       }
       onToast("Отчёт засчитан", "success");
       haptic({ type: "notification", style: "success" });
@@ -238,6 +275,111 @@ export default function RoomScreen({
     }
   }
 
+  function handlePhotoSelection(event: ChangeEvent<HTMLInputElement>) {
+    const selectedFile = event.currentTarget.files?.[0] ?? null;
+    event.currentTarget.value = "";
+    if (!selectedFile) {
+      return;
+    }
+    if (selectedFile && !selectedFile.type.startsWith("image/")) {
+      onToast("Выберите изображение", "error");
+      return;
+    }
+    setMediaFile(selectedFile);
+  }
+
+  function handleVideoSelection(event: ChangeEvent<HTMLInputElement>) {
+    const selectedFile = event.currentTarget.files?.[0] ?? null;
+    event.currentTarget.value = "";
+    if (!selectedFile) {
+      return;
+    }
+    if (!selectedFile.type.startsWith("video/")) {
+      onToast("Выберите видеофайл", "error");
+      return;
+    }
+    if (selectedFile.size > MAX_VIDEO_SIZE) {
+      onToast("Видео слишком большое, максимум 15 МБ", "error");
+      return;
+    }
+    setMediaFile(selectedFile);
+  }
+
+  function handleDeleteVote() {
+    if (!room || deleteSubmitting) {
+      return;
+    }
+    if (!room.deleteRequest) {
+      setDeleteConfirmOpen(true);
+      return;
+    }
+    void submitDeleteVote();
+  }
+
+  async function submitDeleteVote() {
+    if (!room || deleteSubmitting) {
+      return;
+    }
+    setDeleteConfirmOpen(false);
+    setDeleteSubmitting(true);
+    try {
+      const result = await api.voteToDeleteChallenge(room.challenge.id);
+      if (result.deleted) {
+        onToast("Челлендж удалён", "success");
+        onBack();
+        void onDataChanged().catch((refreshError: unknown) => {
+          onToast(
+            refreshError instanceof Error ? refreshError.message : "Не удалось обновить лобби",
+            "error",
+          );
+        });
+        return;
+      }
+      onToast(`За удаление согласны ${result.votesCount} из ${result.totalMembers}`, "info");
+      await loadRoom();
+    } catch (requestError) {
+      onToast(
+        requestError instanceof Error ? requestError.message : "Не удалось проголосовать за удаление",
+        "error",
+      );
+    } finally {
+      setDeleteSubmitting(false);
+    }
+  }
+
+  async function handleCancelDeleteRequest() {
+    if (!room || deleteSubmitting) {
+      return;
+    }
+    setDeleteSubmitting(true);
+    try {
+      await api.cancelDeleteRequest(room.challenge.id);
+      onToast("Запрос на удаление отменён", "success");
+      await loadRoom();
+    } catch (requestError) {
+      onToast(
+        requestError instanceof Error ? requestError.message : "Не удалось отменить удаление",
+        "error",
+      );
+    } finally {
+      setDeleteSubmitting(false);
+    }
+  }
+
+  function handleVideoNoteUploaded() {
+    setVideoNoteOpen(false);
+    setCaption("");
+    setMediaFile(null);
+    onToast("Отчёт засчитан", "success");
+    haptic({ type: "notification", style: "success" });
+    void Promise.all([loadRoom(), onDataChanged()]).catch((refreshError: unknown) => {
+      onToast(
+        refreshError instanceof Error ? refreshError.message : "Не удалось обновить комнату",
+        "error",
+      );
+    });
+  }
+
   if (loading && !room) {
     return <div className="loading-state">Загружаем комнату…</div>;
   }
@@ -260,18 +402,49 @@ export default function RoomScreen({
     <section>
       <div className="room-toolbar">
         <button className="button button--quiet" type="button" onClick={onBack}>← Лобби</button>
-        <button
-          className="button button--quiet"
-          type="button"
-          onClick={() => void shareChallengeInline(
-            room.challenge.title,
-            room.challenge.inviteCode,
-            botUsername,
-          )}
-        >
-          Позвать друзей
-        </button>
+        <div className="room-toolbar-actions">
+          <button
+            className="button button--quiet"
+            type="button"
+            onClick={() => void shareChallengeInline(
+              room.challenge.title,
+              room.challenge.inviteCode,
+              botUsername,
+            )}
+          >
+            Позвать друзей
+          </button>
+        </div>
       </div>
+
+      {room.deleteRequest && (
+        <div className="delete-request-banner" role="status">
+          <div className="delete-request-copy">
+            <strong>Предложено удаление</strong>
+            <span>{room.deleteRequest.initiatorName}: согласны {room.deleteRequest.votesCount} из {room.deleteRequest.totalMembers}</span>
+          </div>
+          <div className="delete-request-actions">
+            {!room.deleteRequest.hasVoted && (
+              <button
+                className="button button--quiet"
+                type="button"
+                disabled={deleteSubmitting}
+                onClick={handleDeleteVote}
+              >
+                ✅ Согласен удалить
+              </button>
+            )}
+            <button
+              className="button button--quiet button--danger"
+              type="button"
+              disabled={deleteSubmitting}
+              onClick={() => void handleCancelDeleteRequest()}
+            >
+              ❌ Оставить челлендж
+            </button>
+          </div>
+        </div>
+      )}
 
       <div className="room-summary">
         <h1>{room.challenge.emoji} {room.challenge.title}</h1>
@@ -281,6 +454,18 @@ export default function RoomScreen({
           {" · "}{room.challenge.proofType === "PHOTO" ? "Фото / кружок" : "Отметка кнопкой"}
         </p>
       </div>
+      {!room.deleteRequest && (
+        <div className="room-delete-action">
+          <button
+            className="button button--quiet button--danger"
+            type="button"
+            disabled={deleteSubmitting}
+            onClick={handleDeleteVote}
+          >
+            🗑 Удалить челлендж
+          </button>
+        </div>
+      )}
 
       {canSubmit ? (
         <form className="card checkin-panel" onSubmit={(event) => void handleSubmit(event)}>
@@ -292,18 +477,46 @@ export default function RoomScreen({
           )}
           {room.challenge.proofType === "PHOTO" ? (
             <>
-              <label className="field-label" htmlFor="proof-photo">Фото пруфа</label>
+              <div className="media-action-panel" aria-label="Добавить пруф">
+                <button className="button button--secondary" type="button" onClick={() => photoInput.current?.click()}>
+                  📷 Фото
+                </button>
+                <button className="button button--secondary" type="button" onClick={() => videoInput.current?.click()}>
+                  🎬 Видео
+                </button>
+                <button className="button button--secondary" type="button" onClick={() => setVideoNoteOpen(true)}>
+                  ⭕ Кружок
+                </button>
+              </div>
               <input
-                id="proof-photo"
                 ref={photoInput}
-                className="file-input"
+                className="visually-hidden"
                 type="file"
                 accept="image/*"
-                capture="environment"
-                onChange={(event) => setPhoto(event.target.files?.[0] ?? null)}
+                onChange={handlePhotoSelection}
               />
+              <input
+                ref={videoInput}
+                className="visually-hidden"
+                type="file"
+                accept="video/*"
+                onChange={handleVideoSelection}
+              />
+              {mediaFile && (
+                <p className="selected-media" role="status">
+                  Выбрано: {mediaFile.name}
+                  <button
+                    className="selected-media-remove"
+                    type="button"
+                    aria-label="Убрать выбранный файл"
+                    onClick={() => setMediaFile(null)}
+                  >
+                    ✕
+                  </button>
+                </p>
+              )}
               <small className="hint">
-                Фото можно отправить здесь. Видеокружок отправьте боту в личные сообщения.
+                Фото сжимаются перед отправкой. Максимальный размер видео — 15 МБ.
               </small>
             </>
           ) : null}
@@ -318,7 +531,11 @@ export default function RoomScreen({
             rows={2}
           />
           <button className="button button--block" type="submit" disabled={submitting}>
-            {submitting ? "Отправляем…" : room.challenge.proofType === "PHOTO" ? "📸 Отправить пруф" : "✅ Закрыть день"}
+            {submitting
+              ? "Отправляем…"
+              : room.challenge.proofType === "PHOTO"
+                ? "📤 Отправить пруф"
+                : "✅ Закрыть день"}
           </button>
           {user.shieldsCount > 0 && (
             <button
@@ -336,6 +553,55 @@ export default function RoomScreen({
           {checkin?.status === "SHIELDED"
             ? "🛡️ Сегодняшняя серия сохранена щитом."
             : "✅ День закрыт. Отличная работа!"}
+        </div>
+      )}
+
+      {videoNoteOpen && (
+        <VideoNoteRecorder
+          challengeId={room.challenge.id}
+          caption={caption}
+          onClose={() => setVideoNoteOpen(false)}
+          onUploaded={handleVideoNoteUploaded}
+          onToast={onToast}
+        />
+      )}
+      {deleteConfirmOpen && (
+        <div
+          className="video-recorder-overlay"
+          role="presentation"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget && !deleteSubmitting) {
+              setDeleteConfirmOpen(false);
+            }
+          }}
+        >
+          <section
+            className="delete-confirm-modal"
+            role="alertdialog"
+            aria-modal="true"
+            aria-labelledby="delete-confirm-title"
+          >
+            <h2 id="delete-confirm-title">Удалить челлендж?</h2>
+            <p>Челлендж и его история будут удалены, только если согласятся все участники.</p>
+            <div className="video-recorder-actions">
+              <button
+                className="button button--secondary"
+                type="button"
+                disabled={deleteSubmitting}
+                onClick={() => setDeleteConfirmOpen(false)}
+              >
+                Отмена
+              </button>
+              <button
+                className="button button--danger"
+                type="button"
+                disabled={deleteSubmitting}
+                onClick={() => void submitDeleteVote()}
+              >
+                {deleteSubmitting ? "Отправляем…" : "Предложить удаление"}
+              </button>
+            </div>
+          </section>
         </div>
       )}
 

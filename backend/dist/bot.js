@@ -65,6 +65,14 @@ function escapeHtml(value) {
         .replaceAll("<", "&lt;")
         .replaceAll(">", "&gt;");
 }
+function getTrackerKeyboard(url = config_1.config.WEBAPP_URL) {
+    return new grammy_1.InlineKeyboard().webApp("📱 Открыть трекер", url);
+}
+function getWebAppInviteUrl(inviteCode) {
+    const url = new URL(config_1.config.WEBAPP_URL);
+    url.searchParams.set("startapp", `join_${inviteCode}`);
+    return url.toString();
+}
 function getUserFacingError(error) {
     if (error instanceof appError_1.AppError) {
         if (error.statusCode === 403 && error.message.includes("3 active challenges")) {
@@ -95,25 +103,28 @@ function registerBotHandlers() {
         if (payload.startsWith("join_")) {
             const inviteCode = payload.slice("join_".length);
             if (!inviteCode) {
-                await ctx.reply("В ссылке отсутствует код приглашения.");
+                await ctx.reply("Приглашение не найдено\nПроверьте ссылку и попробуйте снова.", {
+                    reply_markup: getTrackerKeyboard(),
+                });
                 return;
             }
             try {
                 const result = await (0, checkinService_1.joinChallengeByCode)(inviteCode, user.id);
-                const message = result.joined
-                    ? `Вы вступили в челлендж «${result.challenge.title}»!`
-                    : `Вы уже участвуете в челлендже «${result.challenge.title}».`;
-                const webAppUrl = `${config_1.config.WEBAPP_URL}?startapp=join_${encodeURIComponent(inviteCode)}`;
-                await ctx.reply(message, { reply_markup: new grammy_1.InlineKeyboard().webApp("🚀 Открыть челлендж", webAppUrl) });
+                const webAppUrl = getWebAppInviteUrl(inviteCode);
+                await ctx.reply(result.joined
+                    ? `Вы вступили\n${result.challenge.emoji} ${result.challenge.title}`
+                    : `Вы уже участвуете\n${result.challenge.emoji} ${result.challenge.title}`, { reply_markup: getTrackerKeyboard(webAppUrl) });
             }
             catch (error) {
                 console.error("[telegram] Failed to join challenge from /start", error);
-                await ctx.reply(getUserFacingError(error));
+                await ctx.reply(`Не удалось вступить\n${getUserFacingError(error)}`, {
+                    reply_markup: getTrackerKeyboard(),
+                });
             }
             return;
         }
-        await ctx.reply("Привет! В SquadHabit вы объединяетесь в команды, отмечаете привычки каждый день и поддерживаете общую серию. Друзья могут подтвердить пруф, а щит поможет сохранить серию, если день не задался.", {
-            reply_markup: new grammy_1.InlineKeyboard().webApp("📱 Открыть трекер привычек", config_1.config.WEBAPP_URL),
+        await ctx.reply("SquadHabit\nОтмечайте привычки вместе и поддерживайте командную серию.", {
+            reply_markup: getTrackerKeyboard(),
         });
     });
     activeBot.on("inline_query", async (ctx) => {
@@ -128,15 +139,18 @@ function registerBotHandlers() {
             .map(({ challenge }) => challenge)
             .filter((challenge) => challenge.title.toLowerCase().includes(query))
             .slice(0, 15);
-        let botUsername = runtimeBotUsername ?? activeBot.botInfo?.username;
+        let botUsername = runtimeBotUsername ?? activeBot.botInfo?.username ?? await (0, telegram_1.getBotUsername)();
         if (!botUsername) {
-            botUsername = (await activeBot.api.getMe()).username;
-            runtimeBotUsername = botUsername;
+            throw new Error("Cannot create inline invite links because BOT_USERNAME is unavailable");
         }
+        botUsername = botUsername.replace(/^@/, "");
+        runtimeBotUsername = botUsername;
         const results = matchingChallenges.map((challenge) => {
             const modeLabel = challenge.mode === "HARDCORE" ? "Hardcore" : "Soft";
             const durationLabel = challenge.durationDays === null ? "без ограничения" : `${challenge.durationDays} дней`;
             const description = `${modeLabel} · ${durationLabel} · участников: ${challenge._count.members}`;
+            const inviteUrl = new URL(`https://t.me/${botUsername}`);
+            inviteUrl.searchParams.set("start", `join_${challenge.inviteCode}`);
             const message = `<b>${escapeHtml(challenge.emoji)} ${escapeHtml(challenge.title)}</b>\n\n` +
                 `🔥 Серия команды: <b>${challenge.teamStreak}</b>\n` +
                 "Присоединяйся к нам и поддерживай привычку каждый день!";
@@ -149,24 +163,44 @@ function registerBotHandlers() {
                     message_text: message,
                     parse_mode: "HTML",
                 },
-                reply_markup: new grammy_1.InlineKeyboard().url("⚡ Принять вызов", `https://t.me/${botUsername}?start=join_${challenge.inviteCode}`),
+                reply_markup: new grammy_1.InlineKeyboard().url("⚡ Принять вызов", inviteUrl.toString()),
             };
         });
         await ctx.answerInlineQuery(results, { cache_time: 5, is_personal: true });
     });
-    activeBot.on(["message:photo", "message:video_note"], async (ctx) => {
+    activeBot.on(["message:photo", "message:video_note", "message:video"], async (ctx) => {
         if (ctx.chat.type !== "private") {
-            await ctx.reply("Отправьте фото или видеокружок в личный чат со мной.");
+            await ctx.reply("Отправьте пруф в личный чат с ботом.");
             return;
         }
         const from = ctx.from;
         const user = await upsertBotUser(from);
         const now = new Date();
         const today = (0, timezone_1.getLocalDateString)(now, user.timezone);
-        const mediaType = ctx.message.photo !== undefined ? client_1.MediaType.PHOTO : client_1.MediaType.VIDEO_NOTE;
-        const fileId = ctx.message.photo !== undefined
-            ? ctx.message.photo[ctx.message.photo.length - 1].file_id
-            : ctx.message.video_note.file_id;
+        const message = ctx.message;
+        const photo = "photo" in message ? message.photo : undefined;
+        const videoNote = "video_note" in message ? message.video_note : undefined;
+        const video = "video" in message ? message.video : undefined;
+        let mediaType;
+        let fileId;
+        if (photo?.length) {
+            mediaType = client_1.MediaType.PHOTO;
+            fileId = photo[photo.length - 1].file_id;
+        }
+        else if (videoNote) {
+            mediaType = client_1.MediaType.VIDEO_NOTE;
+            fileId = videoNote.file_id;
+        }
+        else if (video) {
+            mediaType = client_1.MediaType.VIDEO;
+            fileId = video.file_id;
+        }
+        else {
+            await ctx.reply("Пруф не распознан\nОтправьте фото или видео ещё раз.", {
+                reply_markup: getTrackerKeyboard(),
+            });
+            return;
+        }
         const caption = ctx.message.caption;
         const memberships = await db_1.prisma.challengeMember.findMany({
             where: { userId: user.id },
@@ -187,12 +221,16 @@ function registerBotHandlers() {
         });
         const activeMemberships = memberships.filter(({ challenge }) => isActiveChallenge(challenge.createdAt, challenge.durationDays, now));
         if (activeMemberships.length === 0) {
-            await ctx.reply("У вас пока нет активных челленджей. Создайте или примите приглашение в приложении.");
+            await ctx.reply("Нет активных привычек\nСоздайте челлендж или примите приглашение.", {
+                reply_markup: getTrackerKeyboard(),
+            });
             return;
         }
         const pendingMemberships = activeMemberships.filter(({ challenge }) => challenge.checkins.length === 0);
         if (pendingMemberships.length === 0) {
-            await ctx.reply("Все ваши привычки на сегодня уже закрыты. Отличная работа!");
+            await ctx.reply("Сегодня всё отмечено\nОтличная работа!", {
+                reply_markup: getTrackerKeyboard(),
+            });
             return;
         }
         if (pendingMemberships.length === 1) {
@@ -206,13 +244,17 @@ function registerBotHandlers() {
                     telegramFileId: fileId,
                     ...(caption ? { caption } : {}),
                 });
-                await ctx.reply(`Пруф засчитан для «${challenge.title}»!`);
+                await ctx.reply(`Пруф засчитан\n${challenge.emoji} ${challenge.title}`, {
+                    reply_markup: getTrackerKeyboard(),
+                });
             }
             catch (error) {
                 if (!(error instanceof appError_1.AppError)) {
                     throw error;
                 }
-                await ctx.reply(getUserFacingError(error));
+                await ctx.reply(`Не удалось засчитать пруф\n${getUserFacingError(error)}`, {
+                    reply_markup: getTrackerKeyboard(),
+                });
             }
             return;
         }
@@ -234,7 +276,7 @@ function registerBotHandlers() {
         for (const { challenge } of pendingMemberships) {
             keyboard.text(`${challenge.emoji} ${challenge.title}`, `assign_proof:${challenge.id}`).row();
         }
-        await ctx.reply("К какому челленджу прикрепить этот пруф?", {
+        await ctx.reply("Выберите привычку\nКуда прикрепить этот пруф?", {
             reply_markup: keyboard,
         });
     });
@@ -270,7 +312,9 @@ function registerBotHandlers() {
             }
             return;
         }
-        await ctx.editMessageText("Пруф успешно засчитан!");
+        await ctx.editMessageText("Пруф засчитан\nДень закрыт.", {
+            reply_markup: getTrackerKeyboard(),
+        });
     });
     activeBot.on("pre_checkout_query", async (ctx) => {
         const payload = parsePaymentPayload(ctx.preCheckoutQuery.invoice_payload);
@@ -309,13 +353,17 @@ function registerBotHandlers() {
         const payload = parsePaymentPayload(payment.invoice_payload);
         if (!payload) {
             console.error("[telegram] Successful payment has an invalid invoice payload");
-            await ctx.reply("Не удалось проверить покупку. Обратитесь в поддержку.");
+            await ctx.reply("Покупка не подтверждена\nОбратитесь в поддержку.", {
+                reply_markup: getTrackerKeyboard(),
+            });
             return;
         }
         const product = getPaymentProduct(payload.productType);
         if (payment.currency !== "XTR" || payment.total_amount !== product.amountXtr) {
             console.error("[telegram] Successful payment amount or currency does not match product");
-            await ctx.reply("Данные платежа не совпали с товаром. Обратитесь в поддержку.");
+            await ctx.reply("Данные платежа не совпали\nОбратитесь в поддержку.", {
+                reply_markup: getTrackerKeyboard(),
+            });
             return;
         }
         const existingPayment = await db_1.prisma.payment.findUnique({
@@ -325,11 +373,15 @@ function registerBotHandlers() {
         if (existingPayment) {
             if (existingPayment.userId === payload.userId &&
                 existingPayment.productType === payload.productType) {
-                await ctx.reply("Эта покупка уже была активирована.");
+                await ctx.reply("Покупка уже активирована\nБаланс обновлён.", {
+                    reply_markup: getTrackerKeyboard(),
+                });
             }
             else {
                 console.error("[telegram] Payment charge id is already linked to a different purchase");
-                await ctx.reply("Платёж уже обработан. Если покупка не отображается, обратитесь в поддержку.");
+                await ctx.reply("Платёж уже обработан\nЕсли покупка не отображается, обратитесь в поддержку.", {
+                    reply_markup: getTrackerKeyboard(),
+                });
             }
             return;
         }
@@ -383,7 +435,9 @@ function registerBotHandlers() {
                 }
                 if (error instanceof appError_1.AppError) {
                     console.error("[telegram] Successful payment user verification failed", error);
-                    await ctx.reply("Не удалось связать платёж с аккаунтом. Обратитесь в поддержку.");
+                    await ctx.reply("Платёж не активирован\nОбратитесь в поддержку.", {
+                        reply_markup: getTrackerKeyboard(),
+                    });
                     return null;
                 }
                 throw error;
@@ -393,14 +447,16 @@ function registerBotHandlers() {
             return;
         }
         if (activation.duplicate) {
-            await ctx.reply("Эта покупка уже была активирована.");
+            await ctx.reply("Покупка уже активирована\nБаланс обновлён.", {
+                reply_markup: getTrackerKeyboard(),
+            });
             return;
         }
         const activatedUser = activation.user;
         const proMessage = "proDays" in product && product.proDays > 0
-            ? ` PRO активен до ${activatedUser.proUntil?.toLocaleDateString("ru-RU")}.`
+            ? ` PRO до ${activatedUser.proUntil?.toLocaleDateString("ru-RU")}.`
             : "";
-        await ctx.reply(`Покупка активирована: добавлено ${product.shields} щит(ов). Сейчас у вас ${activatedUser.shieldsCount}.${proMessage}`);
+        await ctx.reply(`Покупка активирована\n+${product.shields} щит(ов). Баланс: ${activatedUser.shieldsCount}.${proMessage}`, { reply_markup: getTrackerKeyboard() });
     });
 }
 async function startBot() {

@@ -65,9 +65,9 @@ async function runRemindersJob() {
         }
         const challengeTitles = pendingChallenges
             .map(({ challenge }) => `${challenge.emoji} ${challenge.title}`)
-            .join("\n");
+            .join(" · ");
         try {
-            await (0, telegram_1.sendTelegramMessage)(user.telegramId, `Не забудьте отметить привычки сегодня:\n${challengeTitles}`);
+            await (0, telegram_1.sendTelegramMessage)(user.telegramId, `Напоминание\nПора отметить сегодня: ${challengeTitles}`);
         }
         catch (error) {
             await db_1.db.notificationLog.delete({
@@ -151,7 +151,7 @@ async function runStreakEvaluationJob() {
             !allCompleted &&
             previousTeamStreak > 0) {
             const missedNames = missedMembers.map(({ user }) => user.firstName).join(", ");
-            await Promise.all(challenge.members.map(({ user }) => (0, telegram_1.sendTelegramMessage)(user.telegramId, `Командная серия прервана ${targetDate}. Не отметились: ${missedNames}.`)));
+            await Promise.all(challenge.members.map(({ user }) => (0, telegram_1.sendTelegramMessage)(user.telegramId, `Серия команды прервана\n${targetDate}. Не отметились: ${missedNames}.`)));
         }
     }
 }

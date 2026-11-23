@@ -70,11 +70,11 @@ export async function runRemindersJob(): Promise<void> {
 
     const challengeTitles = pendingChallenges
       .map(({ challenge }) => `${challenge.emoji} ${challenge.title}`)
-      .join("\n");
+      .join(" · ");
     try {
       await sendTelegramMessage(
         user.telegramId,
-        `Не забудьте отметить привычки сегодня:\n${challengeTitles}`,
+        `Напоминание\nПора отметить сегодня: ${challengeTitles}`,
       );
     } catch (error) {
       await db.notificationLog.delete({
@@ -177,7 +177,7 @@ export async function runStreakEvaluationJob(): Promise<void> {
         challenge.members.map(({ user }) =>
           sendTelegramMessage(
             user.telegramId,
-            `Командная серия прервана ${targetDate}. Не отметились: ${missedNames}.`,
+            `Серия команды прервана\n${targetDate}. Не отметились: ${missedNames}.`,
           ),
         ),
       );

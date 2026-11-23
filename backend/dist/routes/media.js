@@ -13,6 +13,8 @@ const mediaTypesByExtension = {
     png: "image/png",
     webp: "image/webp",
     mp4: "video/mp4",
+    mov: "video/quicktime",
+    webm: "video/webm",
     ogg: "audio/ogg",
 };
 function getContentType(filePath, mediaType) {
@@ -21,6 +23,9 @@ function getContentType(filePath, mediaType) {
         return mediaTypesByExtension[extension];
     }
     if (mediaType === "VIDEO_NOTE") {
+        return "video/mp4";
+    }
+    if (mediaType === "VIDEO") {
         return "video/mp4";
     }
     if (mediaType === "PHOTO") {
@@ -75,9 +80,13 @@ function registerMediaRoutes(app) {
         if (!response.ok || !response.body) {
             throw new appError_1.AppError(502, `Telegram media download failed with status ${response.status}`);
         }
-        return reply
+        const contentLength = response.headers.get("content-length");
+        const mediaReply = reply
             .header("Cache-Control", "private, max-age=3600")
-            .type(getContentType(telegramFile.file_path, checkin.mediaType))
-            .send(node_stream_1.Readable.from(streamChunks(response.body)));
+            .type(getContentType(telegramFile.file_path, checkin.mediaType));
+        if (contentLength) {
+            mediaReply.header("Content-Length", contentLength);
+        }
+        return mediaReply.send(node_stream_1.Readable.from(streamChunks(response.body)));
     });
 }

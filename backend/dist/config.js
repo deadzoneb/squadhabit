@@ -18,14 +18,15 @@ const envSchema = zod_1.z.object({
         .transform((value) => value === "true" || value === "1"),
 });
 const env = envSchema.parse(process.env);
+const botUsername = env.BOT_USERNAME?.trim().replace(/^@/, "") || undefined;
 exports.config = {
     port: env.PORT,
     host: env.HOST,
     databaseUrl: env.DATABASE_URL,
     botToken: env.BOT_TOKEN,
-    botUsername: env.BOT_USERNAME,
+    botUsername,
     webappUrl: env.WEBAPP_URL,
-    BOT_USERNAME: env.BOT_USERNAME,
+    BOT_USERNAME: botUsername,
     WEBAPP_URL: env.WEBAPP_URL,
     storageChatId: env.STORAGE_CHAT_ID,
     devMode: env.DEV_MODE,

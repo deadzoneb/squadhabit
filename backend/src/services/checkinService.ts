@@ -195,7 +195,7 @@ export async function toggleVetoVote(checkinId: string, voterId: string) {
   if (result.shouldNotify) {
     await sendTelegramMessage(
       result.telegramId,
-      "Ваш пруф оспорен участниками. Пересдайте его до 23:59 по вашему местному времени.",
+      "Пруф оспорен\nПересдайте до 23:59 по местному времени.",
     );
   }
 

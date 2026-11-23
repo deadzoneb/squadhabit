@@ -21,15 +21,16 @@ const envSchema = z.object({
 });
 
 const env = envSchema.parse(process.env);
+const botUsername = env.BOT_USERNAME?.trim().replace(/^@/, "") || undefined;
 
 export const config = {
   port: env.PORT,
   host: env.HOST,
   databaseUrl: env.DATABASE_URL,
   botToken: env.BOT_TOKEN,
-  botUsername: env.BOT_USERNAME,
+  botUsername,
   webappUrl: env.WEBAPP_URL,
-  BOT_USERNAME: env.BOT_USERNAME,
+  BOT_USERNAME: botUsername,
   WEBAPP_URL: env.WEBAPP_URL,
   storageChatId: env.STORAGE_CHAT_ID,
   devMode: env.DEV_MODE,

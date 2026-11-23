@@ -2,7 +2,7 @@ export type Screen = "lobby" | "create" | "room" | "profile";
 export type ProofType = "PHOTO" | "BUTTON";
 export type ChallengeMode = "HARDCORE" | "SOFT";
 export type CheckinStatus = "APPROVED" | "VETOED" | "SHIELDED";
-export type MediaType = "NONE" | "PHOTO" | "VIDEO_NOTE";
+export type MediaType = "NONE" | "PHOTO" | "VIDEO" | "VIDEO_NOTE";
 export type MemberStatus = "DONE" | "PENDING" | "VETOED" | "SHIELDED";
 export type ReactionEmoji = "🔥" | "💪" | "👏" | "👀";
 export type ProductId = "SHIELD_1" | "SHIELD_5" | "PRO_30";
@@ -116,13 +116,25 @@ export interface MatrixRow {
   dates: Record<string, MemberStatus>;
 }
 
+export interface DeleteRequest {
+  votesCount: number;
+  totalMembers: number;
+  hasVoted: boolean;
+  initiatorName: string;
+}
+
 export interface RoomResponse {
   challenge: Challenge & { members: RoomMember[] };
   today: string;
   feed: RoomFeedItem[];
   matrixDates: string[];
   matrix: MatrixRow[];
+  deleteRequest: DeleteRequest | null;
 }
+
+export type DeleteVoteResponse =
+  | { deleted: true }
+  | { deleted: false; votesCount: number; totalMembers: number; voterIds: string[] };
 
 export interface CreateChallengeInput {
   emoji: string;

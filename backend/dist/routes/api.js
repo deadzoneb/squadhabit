@@ -3,7 +3,11 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.registerApiRoutes = registerApiRoutes;
 const client_1 = require("@prisma/client");
 const grammy_1 = require("grammy");
+const node_child_process_1 = require("node:child_process");
 const node_crypto_1 = require("node:crypto");
+const promises_1 = require("node:fs/promises");
+const node_os_1 = require("node:os");
+const node_path_1 = require("node:path");
 const zod_1 = require("zod");
 const config_1 = require("../config");
 const db_1 = require("../db");
@@ -32,6 +36,7 @@ const settingsSchema = zod_1.z.object({
 const checkinJsonSchema = zod_1.z.object({
     caption: zod_1.z.string().trim().max(1024).optional(),
 });
+const proofKindSchema = zod_1.z.literal("video_note");
 const reactionSchema = zod_1.z.object({
     emoji: zod_1.z.enum(["🔥", "💪", "👏", "👀"]),
 });
@@ -52,6 +57,50 @@ function getCheckinLabel(status) {
 }
 function serializeUser(user) {
     return { ...user, telegramId: user.telegramId.toString() };
+}
+function runFfmpeg(args) {
+    return new Promise((resolve, reject) => {
+        const child = (0, node_child_process_1.spawn)("ffmpeg", args, { stdio: "ignore" });
+        child.once("error", reject);
+        child.once("close", (code) => {
+            if (code === 0) {
+                resolve();
+            }
+            else {
+                reject(new Error(`ffmpeg exited with code ${code ?? "unknown"}`));
+            }
+        });
+    });
+}
+async function convertVideoNoteToMp4(inputBuffer) {
+    const directory = await (0, promises_1.mkdtemp)((0, node_path_1.join)((0, node_os_1.tmpdir)(), "squadhabit-video-note-"));
+    const inputPath = (0, node_path_1.join)(directory, "input");
+    const outputPath = (0, node_path_1.join)(directory, "output.mp4");
+    try {
+        await (0, promises_1.writeFile)(inputPath, inputBuffer);
+        await runFfmpeg([
+            "-y",
+            "-i",
+            inputPath,
+            "-vf",
+            "crop=min(iw\\,ih):min(iw\\,ih),scale=360:360",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-crf",
+            "28",
+            "-c:a",
+            "aac",
+            "-movflags",
+            "+faststart",
+            outputPath,
+        ]);
+        return await (0, promises_1.readFile)(outputPath);
+    }
+    finally {
+        await (0, promises_1.rm)(directory, { recursive: true, force: true });
+    }
 }
 async function createDevPurchase(userId, productId) {
     const product = config_1.STORE_PRODUCTS[productId];
@@ -104,23 +153,26 @@ function registerApiRoutes(app) {
             const initDataHeader = request.headers["x-telegram-init-data"];
             let telegramUser;
             let startParam;
-            if (typeof initDataHeader === "string" && initDataHeader.length > 0) {
+            if (initDataHeader !== undefined) {
+                if (typeof initDataHeader !== "string" || initDataHeader.length === 0) {
+                    return reply.code(401).send({ error: "Invalid Telegram authentication data" });
+                }
                 try {
                     const validatedData = (0, telegramAuth_1.validateTelegramInitData)(initDataHeader);
                     telegramUser = validatedData.user;
                     startParam = validatedData.startParam;
                 }
                 catch (error) {
-                    if (!config_1.config.devMode) {
-                        return reply.code(401).send({ error: "Invalid Telegram authentication data" });
-                    }
-                    request.log.warn({ err: error }, "Using development test user for invalid Telegram auth");
+                    request.log.warn({ err: error }, "Telegram authentication failed");
+                    return reply.code(401).send({ error: "Invalid Telegram authentication data" });
                 }
             }
-            else if (!config_1.config.devMode) {
+            else if (config_1.config.devMode) {
+                telegramUser = telegramAuth_1.DEV_TEST_USER;
+            }
+            else {
                 return reply.code(401).send({ error: "Telegram authentication is required" });
             }
-            telegramUser ??= telegramAuth_1.DEV_TEST_USER;
             const storedUser = await db_1.db.user.upsert({
                 where: { telegramId: BigInt(telegramUser.id) },
                 create: {
@@ -151,7 +203,7 @@ function registerApiRoutes(app) {
             let joinedChallengeId = null;
             let joinError = null;
             const joinPrefix = "join_";
-            const startParam = request.startParam ?? parsed.data.startParam;
+            const startParam = request.startParam?.trim() || parsed.data.startParam?.trim();
             if (startParam?.startsWith(joinPrefix)) {
                 const inviteCode = startParam.slice(joinPrefix.length);
                 if (!inviteCode) {
@@ -172,9 +224,18 @@ function registerApiRoutes(app) {
                     }
                 }
             }
+            let botUsername = config_1.config.botUsername ?? null;
+            if (!botUsername && config_1.config.botToken) {
+                try {
+                    botUsername = await (0, telegram_1.getBotUsername)();
+                }
+                catch {
+                    request.log.warn("Unable to resolve Telegram bot username");
+                }
+            }
             return {
                 user: serializeUser(user),
-                botUsername: config_1.config.botUsername ?? null,
+                botUsername,
                 products: config_1.STORE_PRODUCTS,
                 joinedChallengeId,
                 joinError,
@@ -340,6 +401,19 @@ function registerApiRoutes(app) {
                     reactions: Array.from(groupedReactions, ([emoji, counts]) => ({ emoji, ...counts })),
                 };
             });
+            const deleteVotes = await db_1.db.challengeDeleteVote.findMany({
+                where: { challengeId: challenge.id },
+                include: { user: { select: { firstName: true } } },
+                orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+            });
+            const deleteRequest = deleteVotes.length > 0
+                ? {
+                    votesCount: deleteVotes.length,
+                    totalMembers: challenge.members.length,
+                    hasVoted: deleteVotes.some(({ userId }) => userId === request.currentUser.id),
+                    initiatorName: deleteVotes[0].user.firstName,
+                }
+                : null;
             return {
                 challenge: {
                     ...challenge,
@@ -357,7 +431,92 @@ function registerApiRoutes(app) {
                 feed,
                 matrixDates,
                 matrix,
+                deleteRequest,
             };
+        });
+        api.post("/api/challenges/:id/delete-vote", async (request, reply) => {
+            const parsedParams = idParamsSchema.safeParse(request.params);
+            if (!parsedParams.success) {
+                return reply.code(400).send({ error: "Invalid challenge id" });
+            }
+            const result = await db_1.db.$transaction(async (transaction) => {
+                const locked = await transaction.$queryRaw `
+          SELECT "id" FROM "Challenge" WHERE "id" = ${parsedParams.data.id} FOR UPDATE
+        `;
+                if (locked.length === 0) {
+                    throw new appError_1.AppError(404, "Challenge not found");
+                }
+                const challenge = await transaction.challenge.findUnique({
+                    where: { id: parsedParams.data.id },
+                    include: { members: { select: { userId: true } } },
+                });
+                if (!challenge) {
+                    throw new appError_1.AppError(404, "Challenge not found");
+                }
+                const isMember = challenge.members.some(({ userId }) => userId === request.currentUser.id);
+                if (!isMember) {
+                    throw new appError_1.AppError(403, "You are not a member of this challenge");
+                }
+                if (challenge.members.length === 1) {
+                    await transaction.challenge.delete({ where: { id: challenge.id } });
+                    return { deleted: true };
+                }
+                await transaction.challengeDeleteVote.upsert({
+                    where: {
+                        challengeId_userId: {
+                            challengeId: challenge.id,
+                            userId: request.currentUser.id,
+                        },
+                    },
+                    create: { challengeId: challenge.id, userId: request.currentUser.id },
+                    update: {},
+                });
+                const votes = await transaction.challengeDeleteVote.findMany({
+                    where: { challengeId: challenge.id },
+                    select: { userId: true },
+                });
+                if (votes.length === challenge.members.length) {
+                    await transaction.challenge.delete({ where: { id: challenge.id } });
+                    return { deleted: true };
+                }
+                return {
+                    deleted: false,
+                    votesCount: votes.length,
+                    totalMembers: challenge.members.length,
+                    voterIds: votes.map(({ userId }) => userId),
+                };
+            });
+            return reply.send(result);
+        });
+        api.delete("/api/challenges/:id/delete-vote", async (request, reply) => {
+            const parsedParams = idParamsSchema.safeParse(request.params);
+            if (!parsedParams.success) {
+                return reply.code(400).send({ error: "Invalid challenge id" });
+            }
+            await db_1.db.$transaction(async (transaction) => {
+                const locked = await transaction.$queryRaw `
+          SELECT "id" FROM "Challenge" WHERE "id" = ${parsedParams.data.id} FOR UPDATE
+        `;
+                if (locked.length === 0) {
+                    throw new appError_1.AppError(404, "Challenge not found");
+                }
+                const isMember = await transaction.challengeMember.findUnique({
+                    where: {
+                        challengeId_userId: {
+                            challengeId: parsedParams.data.id,
+                            userId: request.currentUser.id,
+                        },
+                    },
+                    select: { id: true },
+                });
+                if (!isMember) {
+                    throw new appError_1.AppError(403, "You are not a member of this challenge");
+                }
+                await transaction.challengeDeleteVote.deleteMany({
+                    where: { challengeId: parsedParams.data.id },
+                });
+            });
+            return reply.send({ cancelled: true });
         });
         api.post("/api/challenges/:id/checkin", async (request, reply) => {
             const parsedParams = idParamsSchema.safeParse(request.params);
@@ -377,23 +536,33 @@ function registerApiRoutes(app) {
             }
             let caption;
             let telegramFileId;
+            let proofKind;
             let mediaType = client_1.MediaType.NONE;
             if (request.isMultipart()) {
                 if (challenge.proofType !== client_1.ProofType.PHOTO) {
                     throw new appError_1.AppError(400, "This challenge uses button proof, not photo uploads");
                 }
-                let photoBuffer;
-                let filename = "proof.jpg";
+                let mediaBuffer;
+                let filename = "proof";
+                let uploadMimeType;
+                let uploadedMediaType;
                 for await (const part of request.parts()) {
                     if (part.type === "file") {
-                        if (photoBuffer) {
-                            throw new appError_1.AppError(400, "Only one photo can be uploaded");
+                        if (mediaBuffer) {
+                            throw new appError_1.AppError(400, "Only one media file can be uploaded");
                         }
-                        if (!part.mimetype.startsWith("image/")) {
-                            throw new appError_1.AppError(415, "Only image uploads are supported");
+                        if (part.mimetype.startsWith("image/")) {
+                            uploadedMediaType = client_1.MediaType.PHOTO;
                         }
-                        filename = part.filename || filename;
-                        photoBuffer = await part.toBuffer();
+                        else if (part.mimetype.startsWith("video/")) {
+                            uploadedMediaType = client_1.MediaType.VIDEO;
+                        }
+                        else {
+                            throw new appError_1.AppError(400, "Поддерживаются только фото и видео");
+                        }
+                        filename = part.filename || `${filename}.${uploadedMediaType === client_1.MediaType.PHOTO ? "jpg" : "mp4"}`;
+                        uploadMimeType = part.mimetype;
+                        mediaBuffer = await part.toBuffer();
                     }
                     else if (part.fieldname === "caption" && typeof part.value === "string") {
                         const parsedCaption = checkinJsonSchema.safeParse({ caption: part.value });
@@ -402,25 +571,86 @@ function registerApiRoutes(app) {
                         }
                         caption = parsedCaption.data.caption;
                     }
-                }
-                if (!photoBuffer) {
-                    throw new appError_1.AppError(400, "A photo file is required");
-                }
-                mediaType = client_1.MediaType.PHOTO;
-                if (config_1.config.botToken && telegram_1.bot) {
-                    const targetChat = config_1.config.storageChatId ?? request.currentUser.telegramId.toString();
-                    const message = await telegram_1.bot.api.sendPhoto(targetChat, new grammy_1.InputFile(photoBuffer, filename), { caption });
-                    const uploadedPhoto = message.photo?.at(-1);
-                    if (!uploadedPhoto) {
-                        throw new appError_1.AppError(502, "Telegram did not return the uploaded photo");
+                    else if (part.fieldname === "proofKind") {
+                        const parsedProofKind = proofKindSchema.safeParse(typeof part.value === "string" ? part.value : "");
+                        if (!parsedProofKind.success) {
+                            throw new appError_1.AppError(400, "Invalid proof kind");
+                        }
+                        proofKind = parsedProofKind.data;
                     }
-                    telegramFileId = uploadedPhoto.file_id;
+                }
+                if (!mediaBuffer || !uploadedMediaType) {
+                    throw new appError_1.AppError(400, "A photo or video file is required");
+                }
+                if (proofKind && uploadedMediaType !== client_1.MediaType.VIDEO) {
+                    throw new appError_1.AppError(400, "Video notes require a video file");
+                }
+                mediaType = proofKind ? client_1.MediaType.VIDEO_NOTE : uploadedMediaType;
+                if (config_1.config.botToken && telegram_1.bot) {
+                    const targetChat = config_1.config.storageChatId || request.currentUser.telegramId.toString();
+                    let sentMessageId;
+                    if (proofKind) {
+                        const mp4MimeType = uploadMimeType
+                            ?.split(";", 1)[0]
+                            .trim()
+                            .toLowerCase();
+                        const uploadBuffer = mp4MimeType === "video/mp4"
+                            ? mediaBuffer
+                            : await convertVideoNoteToMp4(mediaBuffer);
+                        const uploadFile = new grammy_1.InputFile(uploadBuffer, "video-note.mp4");
+                        try {
+                            const message = await telegram_1.bot.api.sendVideoNote(targetChat, uploadFile, {
+                                disable_notification: true,
+                            });
+                            sentMessageId = message.message_id;
+                            if (!message.video_note) {
+                                throw new Error("Telegram did not return the uploaded video note");
+                            }
+                            telegramFileId = message.video_note.file_id;
+                        }
+                        catch (error) {
+                            request.log.warn({ err: error }, "Telegram video note upload failed; retrying as video");
+                            const message = await telegram_1.bot.api.sendVideo(targetChat, uploadFile, {
+                                disable_notification: true,
+                            });
+                            sentMessageId = message.message_id;
+                            if (!message.video) {
+                                throw new appError_1.AppError(502, "Telegram did not return the uploaded video note");
+                            }
+                            telegramFileId = message.video.file_id;
+                        }
+                    }
+                    else if (mediaType === client_1.MediaType.VIDEO) {
+                        const message = await telegram_1.bot.api.sendVideo(targetChat, new grammy_1.InputFile(mediaBuffer, filename), { caption, disable_notification: true });
+                        if (!message.video) {
+                            throw new appError_1.AppError(502, "Telegram did not return the uploaded video");
+                        }
+                        telegramFileId = message.video.file_id;
+                        sentMessageId = message.message_id;
+                    }
+                    else {
+                        const message = await telegram_1.bot.api.sendPhoto(targetChat, new grammy_1.InputFile(mediaBuffer, filename), { caption, disable_notification: true });
+                        const uploadedPhoto = message.photo?.at(-1);
+                        if (!uploadedPhoto) {
+                            throw new appError_1.AppError(502, "Telegram did not return the uploaded photo");
+                        }
+                        telegramFileId = uploadedPhoto.file_id;
+                        sentMessageId = message.message_id;
+                    }
+                    if (!config_1.config.storageChatId && sentMessageId !== undefined) {
+                        try {
+                            await telegram_1.bot.api.deleteMessage(targetChat, sentMessageId);
+                        }
+                        catch (error) {
+                            request.log.warn({ err: error, targetChat, messageId: sentMessageId }, "Unable to remove temporary media message");
+                        }
+                    }
                 }
                 else if (config_1.config.devMode) {
-                    telegramFileId = `DEV_PHOTO_${(0, node_crypto_1.randomBytes)(8).toString("hex")}`;
+                    telegramFileId = `DEV_${mediaType === client_1.MediaType.VIDEO_NOTE ? "VIDEO_NOTE" : mediaType === client_1.MediaType.VIDEO ? "VIDEO" : "PHOTO"}_${(0, node_crypto_1.randomBytes)(8).toString("hex")}`;
                 }
                 else {
-                    throw new appError_1.AppError(503, "Telegram photo storage is not configured");
+                    throw new appError_1.AppError(503, "Telegram media storage is not configured");
                 }
             }
             else {

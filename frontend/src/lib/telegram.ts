@@ -19,7 +19,7 @@ interface TelegramWebApp {
     notificationOccurred(type: HapticNotificationType): void;
     selectionChanged(): void;
   };
-  switchInlineQuery(
+  switchInlineQuery?(
     query: string,
     chooseChatTypes?: Array<"users" | "bots" | "groups" | "channels">,
   ): void;
@@ -109,16 +109,23 @@ export async function shareChallengeInline(
   botUsername: string | null | undefined,
 ): Promise<void> {
   const webApp = getTelegramWebApp();
-  if (webApp) {
-    webApp.switchInlineQuery(title, ["users", "groups", "channels"]);
-    return;
+  if (webApp?.switchInlineQuery) {
+    try {
+      webApp.switchInlineQuery(title, ["users", "groups", "channels"]);
+      return;
+    } catch (error) {
+      console.warn("[telegram] Unable to open inline sharing", error);
+    }
   }
 
-  const startPayload = `join_${encodeURIComponent(inviteCode)}`;
-  const inviteUrl = botUsername
-    ? `https://t.me/${botUsername}?start=${startPayload}`
-    : `${window.location.origin}/?startapp=${startPayload}`;
-  const copied = await copyText(inviteUrl);
+  const normalizedBotUsername = botUsername?.trim().replace(/^@/, "");
+  if (!normalizedBotUsername) {
+    showToast("Не удалось создать приглашение: не настроено имя бота", "error");
+    return;
+  }
+  const inviteUrl = new URL(`https://t.me/${normalizedBotUsername}`);
+  inviteUrl.searchParams.set("start", `join_${inviteCode}`);
+  const copied = await copyText(inviteUrl.toString());
   showToast(
     copied ? "Ссылка-приглашение скопирована" : "Не удалось скопировать ссылку",
     copied ? "success" : "error",
